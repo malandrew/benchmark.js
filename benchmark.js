@@ -406,49 +406,6 @@
     }
 
     /**
-     * The Callback constructor.
-     *
-     * @constructor
-     * @memberOf Benchmark
-     * @param {Object} clone The cloned benchmark instance.
-     */
-    function Callback(clone) {
-
-      var meta = {
-        timeStamp: undefined,
-        elapsed: undefined
-      };
-
-      function cb() {
-        var deferred = this,
-            clone = deferred.benchmark,
-            bench = clone._original;
-
-        if (bench.aborted) {
-          // cycle() -> clone cycle/complete event -> compute()'s invoked bench.run() cycle/complete
-          deferred.teardown();
-          clone.running = false;
-          cycle(deferred);
-        }
-        else if (++deferred.cycles < clone.count) {
-          clone.compiled.call(deferred, context, timer);
-        }
-        else {
-          timer.stop(deferred);
-          deferred.teardown();
-          delay(clone, function() { cycle(deferred); });
-        }
-      }
-
-      var cb = this;
-      if (cb == null || cb.constructor != Callback) {
-        return new Callback(clone);
-      }
-      cb.benchmark = clone;
-      clock(cb);
-    }
-
-    /**
      * The Deferred constructor.
      *
      * @constructor
@@ -559,32 +516,6 @@
     });
 
     /**
-     * Creates a function from the given arguments string and body.
-     *
-     * @private
-     * @param {string} args The comma separated function arguments.
-     * @param {string} body The function body.
-     * @returns {Function} The new function.
-     */
-    function createFunction() {
-      // lazy define
-      createFunction = function(args, body) {
-        var result,
-            anchor = freeDefine ? freeDefine.amd : Benchmark,
-            prop = uid + 'createFunction';
-
-        runScript((freeDefine ? 'define.amd.' : 'Benchmark.') + prop + '=function(' + args + '){' + body + '}');
-        result = anchor[prop];
-        delete anchor[prop];
-        return result;
-      };
-      // fix JaegerMonkey bug
-      // http://bugzil.la/639720
-      createFunction = support.browser && (createFunction('', 'return"' + uid + '"') || _.noop)() == uid ? createFunction : Function;
-      return createFunction.apply(null, arguments);
-    }
-
-    /**
      * Delay the execution of a function based on the benchmark's `delay` property.
      *
      * @private
@@ -607,18 +538,6 @@
     }
 
     /**
-     * Gets the name of the first argument from a function's source.
-     *
-     * @private
-     * @param {Function} fn The function.
-     * @returns {string} The argument name.
-     */
-    function getFirstArgument(fn) {
-      return (!_.has(fn, 'toString') &&
-        (/^[\s(]*function[^(]*\(([^\s,)]+)/.exec(fn) || 0)[1]) || '';
-    }
-
-    /**
      * Computes the arithmetic mean of a sample.
      *
      * @private
@@ -629,30 +548,6 @@
       return (_.reduce(sample, function(sum, x) {
         return sum + x;
       }) / sample.length) || 0;
-    }
-
-    /**
-     * Gets the source code of a function.
-     *
-     * @private
-     * @param {Function} fn The function.
-     * @returns {string} The function's source code.
-     */
-    function getSource(fn) {
-      var result = '';
-      if (isStringable(fn)) {
-        result = String(fn);
-      } else if (support.decompilation) {
-        // escape the `{` for Firefox 1
-        result = _.result(/^[^{]+\{([\s\S]*)\}\s*$/.exec(fn), 1);
-      }
-      // trim string
-      result = (result || '').replace(/^\s+|\s+$/g, '');
-
-      // detect strings containing only the "use strict" directive
-      return /^(?:\/\*+[\w\W]*?\*\/|\/\/.*?[\n\r\u2028\u2029]|\s)*(["'])use strict\1;?$/.test(result)
-        ? ''
-        : result;
     }
 
     /**
@@ -683,17 +578,6 @@
       }
       var type = typeof object[property];
       return !rePrimitive.test(type) && (type != 'object' || !!object[property]);
-    }
-
-    /**
-     * Checks if a value can be safely coerced to a string.
-     *
-     * @private
-     * @param {*} value The value to check.
-     * @returns {boolean} Returns `true` if the value can be coerced, else `false`.
-     */
-    function isStringable(value) {
-      return _.isString(value) || (_.has(value, 'toString') && _.isFunction(value.toString));
     }
 
     /**
@@ -779,7 +663,8 @@
 
       if (bench.aborted) {
         // cycle() -> clone cycle/complete event -> compute()'s invoked bench.run() cycle/complete
-        deferred.teardown();
+        deferred.cycles = 0; 
+        bench.teardown();
         clone.running = false;
         cycle(deferred);
       }
@@ -788,7 +673,8 @@
       }
       else {
         timer.stop(deferred);
-        deferred.teardown();
+        deferred.cycles = 0; 
+        bench.teardown();
         delay(clone, function() { cycle(deferred); });
       }
     }
@@ -1729,55 +1615,57 @@
       /*----------------------------------------------------------------------*/
       function makeCompiled(deferred) {
 
-        var n, r, s, begin, end;
+        // Using `$` to prevent collisions with user's own own `setup`, `fn` or 
+        // `teardown`
+        var $n, $r, $s, $begin, $end;
 
         var luid = uid + uidCounter++;
 
         // use API of chosen timer
         if (timer.unit == 'ns') {
           if (timer.ns.nanoTime) {
-            begin = function() { s = n.nanoTime(); };
-            end = function() { r = (n.nanoTime() - s) / 1e9; };
+            $begin = function() { $s = $n.nanoTime(); };
+            $end = function() { $r = ($n.nanoTime() - $s) / 1e9; };
           } else {
-            begin = function() { s = n(); };
-            end = function() {
-              r = n(s);
-              r = r[0] + (r[1] / 1e9);
+            $begin = function() { $s = $n(); };
+            $end = function() {
+              $r = $n($s);
+              $r = $r[0] + ($r[1] / 1e9);
             };
           }
         }
         else if (timer.unit == 'us') {
           if (timer.ns.stop) {
-            begin = function() { s = n.start(); };
-            end = function() { r = n.microseconds() / 1e6; };
+            $begin = function() { $s = $n.start(); };
+            $end = function() { $r = $n.microseconds() / 1e6; };
           } else {
-            begin = function() { s = n(); };
-            end = function() { r = (n() - s) / 1e6; };
+            $begin = function() { $s = $n(); };
+            $end = function() { $r = ($n() - $s) / 1e6; };
           }
         }
         else if (timer.ns.now) {
-          begin = function() { s = n.now(); };
-          end = function() { r = (n.now() - s) / 1e3; };
+          $begin = function() { $s = $n.now(); };
+          $end = function() { $r = ($n.now() - $s) / 1e3; };
         }
         else {
-          begin = function() { s = (new n()).getTime(); };
-          end = function() { r = ((new n()).getTime() - s) / 1e3; };
+          $begin = function() { $s = (new $n()).getTime(); };
+          $end = function() { $r = ((new $n()).getTime() - $s) / 1e3; };
         }
 
         if (deferred) {
           // define `timer` methods
           timer.start = function(deferred) {
-            n = this.ns;
-            begin();
+            $n = this.ns;
+            $begin();
             deferred.elapsed = 0;
-            deferred.timeStamp = s;
+            deferred.timeStamp = $s;
           }
 
           timer.stop = function(deferred) {
-            n = this.ns;
-            s = deferred.timeStamp;
-            end();
-            deferred.elapsed = r;
+            $n = this.ns;
+            $s = deferred.timeStamp;
+            $end();
+            deferred.elapsed = $r;
           };
         }
 
@@ -1788,14 +1676,14 @@
           var bench = this,
               fn = bench.fn,
               i = bench.count;
-          n = timer.ns;
+          $n = timer.ns;
           bench.setup();
-          begin();
+          $begin();
           while (i--) { fn(); }
-          end();
+          $end();
           bench.teardown();
           return {
-            elapsed: r,
+            elapsed: $r,
             uid: luid
           };
         } : function (window, timer) {
@@ -1807,18 +1695,11 @@
               bench = deferred.benchmark._original;
 
           // when `deferred.cycles` is `0` then...
-          if(!this.cycles) {
-            deferred.fn = function(){
-              bench.fn(deferred);
-            };
-            deferred.teardown = function() {
-              deferred.cycles = 0; 
-              bench.teardown();
-            };
+          if(!deferred.cycles) {
             bench.setup();
             timer.start(deferred);
           }
-          deferred.fn();
+          bench.fn(deferred);
           return { uid: luid };
         };
       }
@@ -2218,7 +2099,7 @@
 
         // for clones created within `compute()`
         if (bench._original) {
-          if (bench.defer) {
+          if (bench.defer || typeof bench.fn == 'function' && bench.fn.length === 1) {
             Deferred(bench);
           } else {
             cycle(bench, options);
