@@ -406,6 +406,49 @@
     }
 
     /**
+     * The Callback constructor.
+     *
+     * @constructor
+     * @memberOf Benchmark
+     * @param {Object} clone The cloned benchmark instance.
+     */
+    function Callback(clone) {
+
+      var meta = {
+        timeStamp: undefined,
+        elapsed: undefined
+      };
+
+      function cb() {
+        var deferred = this,
+            clone = deferred.benchmark,
+            bench = clone._original;
+
+        if (bench.aborted) {
+          // cycle() -> clone cycle/complete event -> compute()'s invoked bench.run() cycle/complete
+          deferred.teardown();
+          clone.running = false;
+          cycle(deferred);
+        }
+        else if (++deferred.cycles < clone.count) {
+          clone.compiled.call(deferred, context, timer);
+        }
+        else {
+          timer.stop(deferred);
+          deferred.teardown();
+          delay(clone, function() { cycle(deferred); });
+        }
+      }
+
+      var cb = this;
+      if (cb == null || cb.constructor != Callback) {
+        return new Callback(clone);
+      }
+      cb.benchmark = clone;
+      clock(cb);
+    }
+
+    /**
      * The Deferred constructor.
      *
      * @constructor
@@ -926,11 +969,46 @@
         }
       }
 
+      // ref: http://stackoverflow.com/questions/1007981/how-to-get-function-parameter-names-values-dynamically-from-javascript
+      var STRIP_COMMENTS = /((\/\/.*$)|(\/\*[\s\S]*?\*\/))/mg;
+      function isAsyncFunction(fn) {
+        var async = false;
+        if (typeof fn === 'function' && fn.length > 0) {
+          var fnStr = fn.toString().replace(STRIP_COMMENTS, '');
+          var params = fnStr.slice(fnStr.indexOf('(')+1, fnStr.indexOf(')')).match(/([^\s,]+)/g);
+
+          // Should we check if any params are functions or only the last param
+          // since that is convention. Or will async benchmarks only ever have
+          // exactly one argument, either a callback or a deferred. 
+          async = params.some(function(token){
+            var withoutParam = fnStr.slice(fnStr.indexOf(token)).slice(token.length);
+            var atFirstUsage = withoutParam.slice(withoutParam.indexOf(token));
+            var charAfterTokenUsage = atFirstUsage.charAt(token.length);
+
+            if (charAfterTokenUsage === '(') {
+              // Should we also check if the function is executed with either 
+              // #call() or #apply()? Will a test callback ever be called with
+              // either?
+              return true;
+            }
+            if (charAfterTokenUsage === '.' && atFirstUsage.indexOf('resolve()') === token.length + 1) {
+              // Should we also check for other methods on the deferred object
+              // such as:
+              return true;
+            }
+          });
+        }
+        return async;
+      }
+
       /**
        * Checks if invoking `Benchmark#run` with asynchronous cycles.
        */
       function isAsync(object) {
         // avoid using `instanceof` here because of IE memory leak issues with host objects
+        if (object && typeof object.fn === "function" && object.fn.length === 1) {
+          return isAsyncFunction(object.fn);
+        }
         var async = args[0] && args[0].async;
         return Object(object).constructor == Benchmark && name == 'run' &&
           ((async == null ? object.options.async : async) && support.timeout || object.defer);
@@ -1581,12 +1659,17 @@
           clone = deferred.benchmark;
         }
         var bench = clone._original,
-            stringable = isStringable(bench.fn),
             count = bench.count = clone.count,
-            decompilable = stringable || (support.decompilation && (_.has(clone, 'setup') || _.has(clone, 'teardown'))),
             id = bench.id,
             name = bench.name || (typeof id == 'number' ? '<Test #' + id + '>' : id),
             result = 0;
+
+        var isEmpty = typeof bench.fn === 'string' && bench.fn === '';
+
+        if (isEmpty) {
+          bench.fn = _.noop;
+          isEmpty = !isEmpty;
+        }
 
         // init `minTime` if needed
         clone.minTime = bench.minTime || (bench.minTime = bench.options.minTime = options.minTime);
@@ -1601,41 +1684,15 @@
             timer.ns = new applet.Packages.nano;
           }
         }
-        // Compile in setup/teardown functions and the test loop.
-        // Create a new compiled test, instead of using the cached `bench.compiled`,
-        // to avoid potential engine optimizations enabled over the life of the test.
-        var funcBody = deferred
-          ? 'var d#=this,${fnArg}=d#,m#=d#.benchmark._original,f#=m#.fn,su#=m#.setup,td#=m#.teardown;' +
-            // when `deferred.cycles` is `0` then...
-            'if(!d#.cycles){' +
-            // set `deferred.fn`
-            'd#.fn=function(){var ${fnArg}=d#;if(typeof f#=="function"){try{${fn}\n}catch(e#){f#(d#)}}else{${fn}\n}};' +
-            // set `deferred.teardown`
-            'd#.teardown=function(){d#.cycles=0;if(typeof td#=="function"){try{${teardown}\n}catch(e#){td#()}}else{${teardown}\n}};' +
-            // execute the benchmark's `setup`
-            'if(typeof su#=="function"){try{${setup}\n}catch(e#){su#()}}else{${setup}\n};' +
-            // start timer
-            't#.start(d#);' +
-            // execute `deferred.fn` and return a dummy object
-            '}d#.fn();return{uid:"${uid}"}'
 
-          : 'var r#,s#,m#=this,f#=m#.fn,i#=m#.count,n#=t#.ns;${setup}\n${begin};' +
-            'while(i#--){${fn}\n}${end};${teardown}\nreturn{elapsed:r#,uid:"${uid}"}';
-
-        var compiled = bench.compiled = clone.compiled = createCompiled(bench, decompilable, deferred, funcBody),
-            isEmpty = !(templateData.fn || stringable);
+        var compiled = bench.compiled = clone.compiled = makeCompiled(deferred);
 
         try {
-          if (isEmpty) {
-            // Firefox may remove dead code from `Function#toString` results
-            // http://bugzil.la/536085
-            throw new Error('The test "' + name + '" is empty. This may be the result of dead code removal.');
-          }
-          else if (!deferred) {
+          if (!deferred) {
             // pretest to determine if compiled code exits early, usually by a
             // rogue `return` statement, by checking for a return object with the uid
             bench.count = 1;
-            compiled = decompilable && (compiled.call(bench, context, timer) || {}).uid == templateData.uid && compiled;
+            compiled = compiled.call(bench, context, timer);
             bench.count = count;
           }
         } catch(e) {
@@ -1645,15 +1702,7 @@
         }
         // fallback when a test exits early or errors during pretest
         if (!compiled && !deferred && !isEmpty) {
-          funcBody = (
-            stringable || (decompilable && !clone.error)
-              ? 'function f#(){${fn}\n}var r#,s#,m#=this,i#=m#.count'
-              : 'var r#,s#,m#=this,f#=m#.fn,i#=m#.count'
-            ) +
-            ',n#=t#.ns;${setup}\n${begin};m#.f#=f#;while(i#--){m#.f#()}${end};' +
-            'delete m#.f#;${teardown}\nreturn{elapsed:r#}';
-
-          compiled = createCompiled(bench, decompilable, deferred, funcBody);
+          compiled = makeCompiled();
 
           try {
             // pretest one more time to check for errors
@@ -1671,86 +1720,107 @@
         }
         // if no errors run the full test loop
         if (!clone.error) {
-          compiled = bench.compiled = clone.compiled = createCompiled(bench, decompilable, deferred, funcBody);
+          compiled = bench.compiled = clone.compiled = makeCompiled(deferred);
           result = compiled.call(deferred || bench, context, timer).elapsed;
         }
         return result;
       };
 
       /*----------------------------------------------------------------------*/
+      function makeCompiled(deferred) {
 
-      /**
-       * Creates a compiled function from the given function `body`.
-       */
-      function createCompiled(bench, decompilable, deferred, body) {
-        var fn = bench.fn,
-            fnArg = deferred ? getFirstArgument(fn) || 'deferred' : '';
+        var n, r, s, begin, end;
 
-        templateData.uid = uid + uidCounter++;
-
-        _.assign(templateData, {
-          'setup': decompilable ? getSource(bench.setup) : interpolate('m#.setup()'),
-          'fn': decompilable ? getSource(fn) : interpolate('m#.fn(' + fnArg + ')'),
-          'fnArg': fnArg,
-          'teardown': decompilable ? getSource(bench.teardown) : interpolate('m#.teardown()')
-        });
+        var luid = uid + uidCounter++;
 
         // use API of chosen timer
         if (timer.unit == 'ns') {
           if (timer.ns.nanoTime) {
-            _.assign(templateData, {
-              'begin': interpolate('s#=n#.nanoTime()'),
-              'end': interpolate('r#=(n#.nanoTime()-s#)/1e9')
-            });
+            begin = function() { s = n.nanoTime(); };
+            end = function() { r = (n.nanoTime() - s) / 1e9; };
           } else {
-            _.assign(templateData, {
-              'begin': interpolate('s#=n#()'),
-              'end': interpolate('r#=n#(s#);r#=r#[0]+(r#[1]/1e9)')
-            });
+            begin = function() { s = n(); };
+            end = function() {
+              r = n(s);
+              r = r[0] + (r[1] / 1e9);
+            };
           }
         }
         else if (timer.unit == 'us') {
           if (timer.ns.stop) {
-            _.assign(templateData, {
-              'begin': interpolate('s#=n#.start()'),
-              'end': interpolate('r#=n#.microseconds()/1e6')
-            });
+            begin = function() { s = n.start(); };
+            end = function() { r = n.microseconds() / 1e6; };
           } else {
-            _.assign(templateData, {
-              'begin': interpolate('s#=n#()'),
-              'end': interpolate('r#=(n#()-s#)/1e6')
-            });
+            begin = function() { s = n(); };
+            end = function() { r = (n() - s) / 1e6; };
           }
         }
         else if (timer.ns.now) {
-          _.assign(templateData, {
-            'begin': interpolate('s#=n#.now()'),
-            'end': interpolate('r#=(n#.now()-s#)/1e3')
-          });
+          begin = function() { s = n.now(); };
+          end = function() { r = (n.now() - s) / 1e3; };
         }
         else {
-          _.assign(templateData, {
-            'begin': interpolate('s#=new n#().getTime()'),
-            'end': interpolate('r#=(new n#().getTime()-s#)/1e3')
-          });
+          begin = function() { s = (new n()).getTime(); };
+          end = function() { r = ((new n()).getTime() - s) / 1e3; };
         }
-        // define `timer` methods
-        timer.start = createFunction(
-          interpolate('o#'),
-          interpolate('var n#=this.ns,${begin};o#.elapsed=0;o#.timeStamp=s#')
-        );
 
-        timer.stop = createFunction(
-          interpolate('o#'),
-          interpolate('var n#=this.ns,s#=o#.timeStamp,${end};o#.elapsed=r#')
-        );
+        if (deferred) {
+          // define `timer` methods
+          timer.start = function(deferred) {
+            n = this.ns;
+            begin();
+            deferred.elapsed = 0;
+            deferred.timeStamp = s;
+          }
 
-        // create compiled test
-        return createFunction(
-          interpolate('window,t#'),
-          'var global = window, clearTimeout = global.clearTimeout, setTimeout = global.setTimeout;\n' +
-          interpolate(body)
-        );
+          timer.stop = function(deferred) {
+            n = this.ns;
+            s = deferred.timeStamp;
+            end();
+            deferred.elapsed = r;
+          };
+        }
+
+        return !deferred ? function (window, timer) {
+          var global = window,
+              clearTimeout = global.clearTimeout, 
+              setTimeout = global.setTimeout;
+          var bench = this,
+              fn = bench.fn,
+              i = bench.count;
+          n = timer.ns;
+          bench.setup();
+          begin();
+          while (i--) { fn(); }
+          end();
+          bench.teardown();
+          return {
+            elapsed: r,
+            uid: luid
+          };
+        } : function (window, timer) {
+          var global = window,
+              clearTimeout = global.clearTimeout, 
+              setTimeout = global.setTimeout;
+
+          var deferred = this,
+              bench = deferred.benchmark._original;
+
+          // when `deferred.cycles` is `0` then...
+          if(!this.cycles) {
+            deferred.fn = function(){
+              bench.fn(deferred);
+            };
+            deferred.teardown = function() {
+              deferred.cycles = 0; 
+              bench.teardown();
+            };
+            bench.setup();
+            timer.start(deferred);
+          }
+          deferred.fn();
+          return { uid: luid };
+        };
       }
 
       /**
@@ -1806,14 +1876,6 @@
         }
         // convert to seconds
         return getMean(sample) / divisor;
-      }
-
-      /**
-       * Interpolates a given template string.
-       */
-      function interpolate(string) {
-        // replaces all occurrences of `#` with a unique number and template tokens with content
-        return _.template(string.replace(/\#/g, /\d+/.exec(templateData.uid)), templateData);
       }
 
       /*----------------------------------------------------------------------*/

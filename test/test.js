@@ -226,7 +226,7 @@
 
     var tests = {
       'inlined "setup", "fn", and "teardown"': (
-        'if(/ops/.test(this))this._fn=true;'
+        function(){ if (/ops/.test(this)) this._fn = true;}
       ),
       'called "fn" and inlined "setup"/"teardown" reached by error': function() {
         count++;
@@ -245,9 +245,9 @@
     _.forOwn(tests, function(fn, title) {
       test('has correct binding for ' + title, function() {
         var bench = Benchmark({
-          'setup': 'if(/ops/.test(this))this._setup=true;',
+          'setup': function(){ if (/ops/.test(this)) this._setup = true; },
           'fn': fn,
-          'teardown': 'if(/ops/.test(this))this._teardown=true;',
+          'teardown': function(){ if (/ops/.test(this)) this._teardown = true;},
           'onCycle': function() { this.abort(); }
         }).run();
 
@@ -1226,7 +1226,7 @@
       ok(event.type == 'complete' && event.currentTarget.name == 'suite' && event.target.name == 'bench');
     });
 
-    test('emitted all expected events', function() {
+    test('emitted all expected events', function(whoa) {
       ok(events.length == 11);
     });
   }());
@@ -1236,6 +1236,19 @@
   QUnit.module('Deferred benchmarks');
 
   (function() {
+    asyncTest('should run an async test with callback correctly', function() {
+      Benchmark(function(done) {
+        setTimeout(function() { done.resolve(); }, 1e3);
+      }, {
+        'defer': true,
+        'onComplete': function() {
+          equal(this.hz.toFixed(0), 1);
+          QUnit.start();
+        }
+      })
+      .run();
+    });
+
     asyncTest('should run a deferred benchmark correctly', function() {
       Benchmark(function(deferred) {
         setTimeout(function() { deferred.resolve(); }, 1e3);
@@ -1249,19 +1262,20 @@
       .run();
     });
 
-    asyncTest('should run with string values for "fn", "setup", and "teardown"', function() {
-      Benchmark({
-        'defer': true,
-        'setup': 'var x = [3, 2, 1];',
-        'fn': 'setTimeout(function() { x.sort(); deferred.resolve(); }, 10);',
-        'teardown': 'x.length = 0;',
-        'onComplete': function() {
-          ok(true);
-          QUnit.start();
-        }
-      })
-      .run();
-    });
+    // asyncTest('should run with string values for "fn", "setup", and "teardown"', function() {
+    //   var x;
+    //   Benchmark({
+    //     'defer': true,
+    //     'setup': function() { x = [3, 2, 1]; },
+    //     'fn': function(deferred) { setTimeout(function() { x.sort(); deferred.resolve(); }, 10); },
+    //     'teardown': function() { x.length = 0; },
+    //     'onComplete': function() {
+    //       ok(true);
+    //       QUnit.start();
+    //     }
+    //   })
+    //   .run();
+    // });
 
     asyncTest('should execute "setup", "fn", and "teardown" in correct order', function() {
       var fired = [];
